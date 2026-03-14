@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
-import { UploadCloud, Download, Type, PenTool, Image as ImageIcon, MousePointer2, Trash2, ChevronLeft, ChevronRight, Loader2, Eraser, Highlighter, Square, Circle, Edit3, X, ZoomIn, ZoomOut, Bold, Italic, Underline, Link as LinkIcon, Wand2, Undo2, Redo2 } from "lucide-react";
+import { PDFDocument, rgb, StandardFonts, degrees } from "pdf-lib";
+import { UploadCloud, Download, Type, PenTool, Image as ImageIcon, MousePointer2, Trash2, ChevronLeft, ChevronRight, Loader2, Eraser, Highlighter, Square, Circle, Edit3, X, ZoomIn, ZoomOut, Bold, Italic, Underline, Link as LinkIcon, Wand2, Undo2, Redo2, ChevronDown, Shapes, RotateCw } from "lucide-react";
 import { pdfjs, Document, Page } from "react-pdf";
 import { useDropzone } from "react-dropzone";
 import { cn } from "../lib/utils";
-import { Stage, Layer, Text, Image as KonvaImage, Line, Transformer, Rect, Ellipse } from "react-konva";
+import { Stage, Layer, Text, Image as KonvaImage, Line, Transformer, Rect, Ellipse, Label, Tag } from "react-konva";
 import useImage from "use-image";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -16,6 +16,7 @@ interface BaseElement {
   type: 'text' | 'image' | 'line' | 'rect' | 'ellipse';
   x: number;
   y: number;
+  rotation?: number;
   pageIndex: number;
 }
 
@@ -28,6 +29,7 @@ interface TextElement extends BaseElement {
   isBold?: boolean;
   isItalic?: boolean;
   isUnderline?: boolean;
+  backgroundColor?: string;
   url?: string;
 }
 
@@ -124,6 +126,72 @@ const URLImage = ({ image, isSelected, onSelect, onChange }: any) => {
   );
 };
 
+const RotatableText = ({ element, tool, isSelected, onSelect, onChange }: any) => {
+  const shapeRef = useRef<any>(null);
+  const trRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (isSelected && trRef.current && shapeRef.current) {
+      trRef.current.nodes([shapeRef.current]);
+      trRef.current.getLayer().batchDraw();
+    }
+  }, [isSelected]);
+
+  return (
+    <React.Fragment>
+      <Label
+        ref={shapeRef}
+        x={element.x}
+        y={element.y}
+        rotation={element.rotation || 0}
+        draggable={tool === 'select'}
+        onClick={onSelect}
+        onTap={onSelect}
+        onDragEnd={(e) => {
+          onChange({
+            ...element,
+            x: e.target.x(),
+            y: e.target.y(),
+          });
+        }}
+        onTransformEnd={(e) => {
+          const node = shapeRef.current;
+          onChange({
+            ...element,
+            x: node.x(),
+            y: node.y(),
+            rotation: node.rotation(),
+          });
+        }}
+      >
+        {element.backgroundColor && element.backgroundColor !== 'transparent' && (
+          <Tag fill={element.backgroundColor} cornerRadius={2} />
+        )}
+        <Text
+          text={element.text}
+          fontSize={element.fontSize}
+          fontFamily={element.fontFamily || 'Helvetica'}
+          fontStyle={`${element.isItalic ? 'italic ' : ''}${element.isBold ? 'bold' : 'normal'}`}
+          textDecoration={element.isUnderline ? 'underline' : ''}
+          fill={element.url ? '#2563eb' : element.color}
+          padding={element.backgroundColor && element.backgroundColor !== 'transparent' ? 2 : 0}
+          width={element.width}
+          wrap="none"
+          ellipsis={false}
+        />
+      </Label>
+      {isSelected && tool === 'select' && (
+        <Transformer
+          ref={trRef}
+          resizeEnabled={false} // Disable resizing for text to keep font-size scaling pure, only rotation
+          rotateEnabled={true}
+          boundBoxFunc={(oldBox, newBox) => newBox}
+        />
+      )}
+    </React.Fragment>
+  );
+};
+
 export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) {
   const [file, setFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -142,11 +210,36 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
   const [hiddenPdfTextIds, setHiddenPdfTextIds] = useState<string[]>([]);
   const [hoveredMagicId, setHoveredMagicId] = useState<string | null>(null);
   
-  const [history, setHistory] = useState<{ elements: PdfElement[], hiddenPdfTextIds: string[] }[]>([{ elements: [], hiddenPdfTextIds: [] }]);
+  const [history, setHistory] = useState<{ elements: PdfElement[], hiddenPdfTextIds: string[], page: number }[]>([
+    { elements: [], hiddenPdfTextIds: [], page: 1 }
+  ]);
   const [historyStep, setHistoryStep] = useState<number>(0);
   const historyStepRef = useRef(0);
 
   const stageRef = useRef<any>(null);
+  const trRef = useRef<any>(null);
+
+  useEffect(() => {
+    const usedFonts = new Set<string>();
+    elements.forEach(el => {
+      if (el.type === 'text' && el.fontFamily && !['Helvetica', 'TimesRoman', 'Courier', 'Symbol', 'ZapfDingbats'].includes(el.fontFamily)) {
+        usedFonts.add(el.fontFamily);
+      }
+    });
+
+    if (usedFonts.size > 0) {
+      const fontFamilies = Array.from(usedFonts).map(f => f.replace(/\s+/g, '+')).join('|');
+      const linkId = 'dynamic-google-fonts';
+      let link = document.getElementById(linkId) as HTMLLinkElement;
+      if (!link) {
+        link = document.createElement('link');
+        link.id = linkId;
+        link.rel = 'stylesheet';
+        document.head.appendChild(link);
+      }
+      link.href = `https://fonts.googleapis.com/css?family=${fontFamilies}&display=swap`;
+    }
+  }, [elements]);
 
   const updateHistoryStep = useCallback((step: number) => {
     setHistoryStep(step);
@@ -156,28 +249,55 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
   const pushToHistory = useCallback((newElements: PdfElement[], newHiddenIds: string[]) => {
     setHistory(prevHistory => {
       const currentStep = historyStepRef.current;
+      // Deep clone to prevent unintended mutations from the current state
+      const clonedElements = JSON.parse(JSON.stringify(newElements));
+      const clonedHiddenIds = [...newHiddenIds];
+      
       const newHistory = prevHistory.slice(0, currentStep + 1);
-      newHistory.push({ elements: newElements, hiddenPdfTextIds: newHiddenIds });
-      updateHistoryStep(currentStep + 1);
-      return newHistory;
+      newHistory.push({ 
+        elements: clonedElements, 
+        hiddenPdfTextIds: clonedHiddenIds, 
+        page: currentPage 
+      });
+      
+      // Limit history to 50 steps
+      const finalHistory = newHistory.length > 51 ? newHistory.slice(newHistory.length - 51) : newHistory;
+      updateHistoryStep(finalHistory.length - 1);
+      return finalHistory;
     });
-  }, [updateHistoryStep]);
+  }, [updateHistoryStep, currentPage]);
 
   const handleUndo = useCallback(() => {
     if (historyStep > 0) {
       const prevStep = historyStep - 1;
+      const state = history[prevStep];
       updateHistoryStep(prevStep);
-      setElements(history[prevStep].elements);
-      setHiddenPdfTextIds(history[prevStep].hiddenPdfTextIds);
+      setElements(JSON.parse(JSON.stringify(state.elements)));
+      setHiddenPdfTextIds([...state.hiddenPdfTextIds]);
+      setCurrentPage(state.page);
+      
+      // Preserve selection if the element still exists in the previous state
+      setSelectedId(prevId => {
+        if (!prevId) return null;
+        return state.elements.find(el => el.id === prevId) ? prevId : null;
+      });
     }
   }, [historyStep, history, updateHistoryStep]);
 
   const handleRedo = useCallback(() => {
     if (historyStep < history.length - 1) {
       const nextStep = historyStep + 1;
+      const state = history[nextStep];
       updateHistoryStep(nextStep);
-      setElements(history[nextStep].elements);
-      setHiddenPdfTextIds(history[nextStep].hiddenPdfTextIds);
+      setElements(JSON.parse(JSON.stringify(state.elements)));
+      setHiddenPdfTextIds([...state.hiddenPdfTextIds]);
+      setCurrentPage(state.page);
+      
+      // Preserve selection if the element still exists in the next state
+      setSelectedId(prevId => {
+        if (!prevId) return null;
+        return state.elements.find(el => el.id === prevId) ? prevId : null;
+      });
     }
   }, [historyStep, history, updateHistoryStep]);
 
@@ -191,11 +311,33 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
       setPdfUrl(null);
       setElements([]);
       setHiddenPdfTextIds([]);
-      setHistory([{ elements: [], hiddenPdfTextIds: [] }]);
+      setHistory([{ elements: [], hiddenPdfTextIds: [], page: 1 }]);
       updateHistoryStep(0);
       setCurrentPage(1);
     }
   };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger undo/redo if the user is typing in an input or textarea
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        e.preventDefault();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+        handleRedo();
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -209,6 +351,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
     
     try {
       const textContent = await page.getTextContent();
+      const styles = textContent.styles;
       
       const items = textContent.items.filter((item: any) => item.str.trim().length > 0);
       
@@ -234,18 +377,44 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
             x: pdfX,
             y: pdfY,
             width: width,
-            fontSize: fontSize,
+            rotation: Math.atan2(item.transform[1], item.transform[0]) * (180 / Math.PI),
+            dirX: item.transform[0] / fontSize,
+            dirY: item.transform[1] / fontSize,
+            ascentX: item.transform[2] / fontSize,
+            ascentY: item.transform[3] / fontSize,
           };
         } else {
-          const isSameLine = Math.abs(currentGroup.y - pdfY) < fontSize * 0.5;
-          const gap = pdfX - (currentGroup.x + currentGroup.width);
-          const isClose = gap < fontSize * 2; // Allow some gap for spaces
+          const rotation = Math.atan2(item.transform[1], item.transform[0]) * (180 / Math.PI);
+          const isRotated = Math.abs(rotation) > 0.1;
+          const rotationDiff = Math.abs(currentGroup.rotation - rotation);
+          const isSameRotation = isRotated ? (rotationDiff < 0.8) : (rotationDiff < 0.2);
+          
+          // Melhoria para detecção de texto vertical/diagonal
+          const angleRad = (rotation * Math.PI) / 180;
+          const cosA = Math.cos(angleRad);
+          const sinA = Math.sin(angleRad);
 
-          if (isSameLine && isClose) {
-            if (gap > fontSize * 0.2) currentGroup.str += ' ';
+          // Projeta a distância entre os pontos no eixo do texto
+          const dx = pdfX - currentGroup.x;
+          const dy = pdfY - currentGroup.y;
+          const distAlongText = dx * cosA + dy * sinA;
+          const distPerpText = Math.abs(-dx * sinA + dy * cosA);
+
+          // Interaction Floor: Threshold mínimo de 1.5px p/ garantir seleção de fontes pequenas
+          const perpThreshold = Math.max(isRotated ? fontSize * 0.15 : fontSize * 0.15, 1.5);
+          const isSameLine = distPerpText < perpThreshold;
+          
+          // Gap Floor: Threshold mínimo de 2px p/ evitar fragmentação de palavras em fontes pequenas
+          const gapThreshold = Math.max(isRotated ? fontSize * 0.5 : fontSize * 0.3, 2.0);
+          const gap = distAlongText - currentGroup.width;
+          const isClose = gap < gapThreshold;
+
+          if (isSameLine && isClose && isSameRotation) {
+            if (gap > fontSize * 0.05) currentGroup.str += ' ';
             currentGroup.str += item.str;
-            currentGroup.width = (pdfX + width) - currentGroup.x;
+            currentGroup.width = distAlongText + width;
             currentGroup.fontSize = Math.max(currentGroup.fontSize, fontSize);
+            // Mantemos a rotação do primeiro item como 'master' para evitar drift
           } else {
             groupedTexts.push(currentGroup);
             currentGroup = {
@@ -254,21 +423,51 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
               y: pdfY,
               width: width,
               fontSize: fontSize,
+              fontFamily: styles[item.fontName]?.fontFamily || 'Helvetica',
+              rotation: rotation,
+              dirX: item.transform[0] / fontSize,
+              dirY: item.transform[1] / fontSize,
+              ascentX: item.transform[2] / fontSize,
+              ascentY: item.transform[3] / fontSize,
             };
           }
         }
       }
       if (currentGroup) groupedTexts.push(currentGroup);
-
       const texts = groupedTexts.map((item: any, index: number) => {
+        const isElementRotated = Math.abs(item.rotation) > 0.1;
+        
+        // Ratio unificado em 0.80: Com o mapeamento vetorial robusto, 
+        // 0.80 atende perfeitamente tanto horizontais quanto inclinados.
+        const baselineRatio = 0.80;
+
+        // Buffer Floor: Mínimo de 0.5px p/ garantir hitbox em escalas reduzidas
+        const widthBuffer = isElementRotated ? Math.max(item.width * 0.01, 0.5) : 0;
+
+        // Ponto de origem (Baseline Left) ajustado para centralização óptica (TL)
+        const pdfX_tl = item.x + (item.fontSize * baselineRatio * item.ascentX) - (widthBuffer / 2 * item.dirX);
+        const pdfY_tl = item.y + (item.fontSize * baselineRatio * item.ascentY) - (widthBuffer / 2 * item.dirY);
+
+        // Mapeamento Robusto: Converte para Viewport considerando TODAS as transformações (escala, flip, rotação da página)
+        const [screenX, screenY] = viewport.convertToViewportPoint(pdfX_tl, pdfY_tl);
+        
+        // Cálculo de Ângulo Vetorial: Projetamos um vetor unitário da direção do texto para calcular o ângulo real na tela
+        const [v0x, v0y] = viewport.convertToViewportPoint(0, 0);
+        const [v1x, v1y] = viewport.convertToViewportPoint(item.dirX, item.dirY);
+        const screenAngle = Math.atan2(v1y - v0y, v1x - v0x) * (180 / Math.PI);
+        
         return {
           id: `page-${currentPage}-text-${index}-${item.x}-${item.y}`,
           str: item.str,
-          x: item.x,
-          y: viewport.height - item.y - item.fontSize * 0.8,
-          width: item.width,
-          height: item.fontSize * 1.2,
+          x: screenX,
+          y: screenY,
+          width: item.width + widthBuffer,
+          height: item.fontSize, 
           fontSize: item.fontSize,
+          fontFamily: item.fontFamily,
+          rotation: screenAngle,
+          isBold: item.fontFamily?.toLowerCase().includes('bold') || false,
+          isItalic: item.fontFamily?.toLowerCase().includes('italic') || item.fontFamily?.toLowerCase().includes('oblique') || false,
         };
       });
       
@@ -407,28 +606,144 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
   const handleMagicEditClick = (pt: any) => {
     if (tool !== 'magic-edit') return;
     
-    const padding = 0; // Bem justo
+    // Precisão Máxima: Zero Padding para cobertura 100% "colada" no texto original.
+    const paddingX = 0; 
+    const paddingY = 0;
+
+    // Amostragem por Área (Grade 7x7): Captura 49 pontos para detectar a cor com maior porcentagem (moda).
+    let bgColor = '#ffffff';
+    try {
+      const canvases = document.querySelectorAll('.react-pdf__Page__canvas');
+      if (canvases.length > 0) {
+        const canvas = canvases[0] as HTMLCanvasElement;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        
+        if (ctx) {
+          const colors: { [hex: string]: number } = {};
+          const angleRad = (pt.rotation || 0) * (Math.PI / 180);
+          const cosA = Math.cos(angleRad);
+          const sinA = Math.sin(angleRad);
+
+          // Criar uma grade 7x7 sobre a área do texto (incluindo margem de padding)
+          for (let row = 0; row < 7; row++) {
+            for (let col = 0; col < 7; col++) {
+              // Coordenadas locais na grade (de -paddingX/Y até width/height + paddingX/Y)
+              const lx = -paddingX + (col * (pt.width + paddingX * 2) / 6);
+              const ly = -paddingY + (row * (pt.height + paddingY * 2) / 6);
+              
+              // Rotacionar para espaço global
+              const globalDX = lx * cosA - ly * sinA;
+              const globalDY = lx * sinA + ly * cosA;
+              
+              const sampleX = Math.max(0, (pt.x * scale) + globalDX * scale);
+              const sampleY = Math.max(0, (pt.y * scale) + globalDY * scale);
+              
+              const pixel = ctx.getImageData(sampleX * devicePixelRatio, sampleY * devicePixelRatio, 1, 1).data;
+              if (pixel[3] > 0) {
+                const hex = `#${pixel[0].toString(16).padStart(2, '0')}${pixel[1].toString(16).padStart(2, '0')}${pixel[2].toString(16).padStart(2, '0')}`;
+                colors[hex] = (colors[hex] || 0) + 1;
+              }
+            }
+          }
+
+          const sortedColors = Object.entries(colors).sort((a, b) => b[1] - a[1]);
+          if (sortedColors.length > 0) {
+            bgColor = sortedColors[0][0];
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Could not read canvas pixels for background color", e);
+    }
+    
+    const angleRad = (pt.rotation || 0) * (Math.PI / 180);
+    const cosA = Math.cos(angleRad);
+    const sinA = Math.sin(angleRad);
+    
+    // Deslocamento vetorial para centralizar o padding (mesmo em vertical/diagonal)
+    const dx = (-paddingX) * cosA - (-paddingY) * sinA;
+    const dy = (-paddingX) * sinA + (-paddingY) * cosA;
+
     const newRect: RectElement = {
       id: Date.now().toString() + '-bg',
       type: 'rect',
       pageIndex: currentPage - 1,
-      x: pt.x - padding,
-      y: pt.y - padding,
-      width: pt.width + (padding * 2),
-      height: pt.height + (padding * 2),
-      color: '#ffffff',
+      x: pt.x + dx,
+      y: pt.y + dy,
+      width: pt.width + (paddingX * 2),
+      height: pt.height + (paddingY * 2),
+      color: bgColor,
+      rotation: pt.rotation,
       isWhiteout: true,
     };
     
+    const getBestMatchingFont = (original: string): string => {
+      const lower = original.toLowerCase();
+      
+      // Direct matches for 200+ library
+      if (lower.includes('roboto')) return 'Roboto';
+      if (lower.includes('inter')) return 'Inter';
+      if (lower.includes('montserrat')) return 'Montserrat';
+      if (lower.includes('open sans')) return 'Open Sans';
+      if (lower.includes('lato')) return 'Lato';
+      if (lower.includes('poppins')) return 'Poppins';
+      if (lower.includes('raleway')) return 'Raleway';
+      if (lower.includes('ubuntu')) return 'Ubuntu';
+      if (lower.includes('verdana')) return 'Verdana';
+      if (lower.includes('tahoma')) return 'Tahoma';
+      if (lower.includes('trebuchet')) return 'Trebuchet MS';
+      if (lower.includes('century gothic')) return 'Century Gothic';
+      if (lower.includes('calibri')) return 'Calibri';
+      if (lower.includes('segoe ui')) return 'Segoe UI';
+      // Expanded Sans check to avoid falling into 'serif' catch-all
+      if (lower.includes('helvetica') || lower.includes('arial') || lower.includes('sans') || lower.includes('liberation')) return 'Helvetica';
+      
+      if (lower.includes('georgia')) return 'Georgia';
+      if (lower.includes('garamond')) return 'Garamond';
+      if (lower.includes('palatino')) return 'Palatino';
+      if (lower.includes('baskerville')) return 'Baskerville';
+      if (lower.includes('playfair')) return 'Playfair Display';
+      if (lower.includes('lora')) return 'Lora';
+      if (lower.includes('merriweather')) return 'Merriweather';
+      if (lower.includes('times')) return 'TimesRoman';
+      
+      if (lower.includes('consolas')) return 'Consolas';
+      if (lower.includes('fira code')) return 'Fira Code';
+      if (lower.includes('jetbrains')) return 'JetBrains Mono';
+      if (lower.includes('monaco')) return 'Monaco';
+      if (lower.includes('courier')) return 'Courier';
+      
+      if (lower.includes('comic sans')) return 'Comic Sans MS';
+      if (lower.includes('pacifico')) return 'Pacifico';
+      if (lower.includes('brush script')) return 'Brush Script MT';
+      if (lower.includes('impact')) return 'Impact';
+      
+      if (lower.includes('symbol')) return 'Symbol';
+      if (lower.includes('zapf') || lower.includes('dingbats') || lower.includes('wingdings')) return 'ZapfDingbats';
+
+      // Advanced category fallback - specifically excluding 'sans' from 'serif' check
+      if (lower.includes('serif') && !lower.includes('sans')) return 'TimesRoman';
+      if (lower.includes('mono') || lower.includes('fixed') || lower.includes('code')) return 'Courier';
+      if (lower.includes('script') || lower.includes('hand')) return 'Pacifico';
+      
+      return 'Helvetica';
+    };
+
+    const originalFont = pt.fontFamily?.toLowerCase() || '';
+    const mappedFont = getBestMatchingFont(originalFont);
+
     const newText: TextElement = {
       id: Date.now().toString() + '-txt',
       type: 'text',
       pageIndex: currentPage - 1,
       x: pt.x,
-      y: pt.y + pt.height * 0.1,
+      y: pt.y,
       text: pt.str,
       fontSize: pt.fontSize,
-      fontFamily: 'Helvetica',
+      fontFamily: mappedFont,
+      isBold: pt.isBold,
+      isItalic: pt.isItalic,
+      rotation: pt.rotation,
       color: '#000000',
     };
     
@@ -527,10 +842,36 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
       const pdfDoc = await PDFDocument.load(arrayBuffer);
       
       const fonts = {
-        normal: await pdfDoc.embedFont(StandardFonts.Helvetica),
-        bold: await pdfDoc.embedFont(StandardFonts.HelveticaBold),
-        italic: await pdfDoc.embedFont(StandardFonts.HelveticaOblique),
-        boldItalic: await pdfDoc.embedFont(StandardFonts.HelveticaBoldOblique),
+        Helvetica: {
+          normal: await pdfDoc.embedFont(StandardFonts.Helvetica),
+          bold: await pdfDoc.embedFont(StandardFonts.HelveticaBold),
+          italic: await pdfDoc.embedFont(StandardFonts.HelveticaOblique),
+          boldItalic: await pdfDoc.embedFont(StandardFonts.HelveticaBoldOblique),
+        },
+        TimesRoman: {
+          normal: await pdfDoc.embedFont(StandardFonts.TimesRoman),
+          bold: await pdfDoc.embedFont(StandardFonts.TimesRomanBold),
+          italic: await pdfDoc.embedFont(StandardFonts.TimesRomanItalic),
+          boldItalic: await pdfDoc.embedFont(StandardFonts.TimesRomanBoldItalic),
+        },
+        Courier: {
+          normal: await pdfDoc.embedFont(StandardFonts.Courier),
+          bold: await pdfDoc.embedFont(StandardFonts.CourierBold),
+          italic: await pdfDoc.embedFont(StandardFonts.CourierOblique),
+          boldItalic: await pdfDoc.embedFont(StandardFonts.CourierBoldOblique),
+        },
+        Symbol: {
+          normal: await pdfDoc.embedFont(StandardFonts.Symbol),
+          bold: await pdfDoc.embedFont(StandardFonts.Symbol),
+          italic: await pdfDoc.embedFont(StandardFonts.Symbol),
+          boldItalic: await pdfDoc.embedFont(StandardFonts.Symbol),
+        },
+        ZapfDingbats: {
+          normal: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
+          bold: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
+          italic: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
+          boldItalic: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
+        }
       };
 
       const pages = pdfDoc.getPages();
@@ -543,35 +884,115 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
 
         if (el.type === 'text') {
           const rgbColor = hexToRgb(el.color);
-          let font = fonts.normal;
-          if (el.isBold && el.isItalic) font = fonts.boldItalic;
-          else if (el.isBold) font = fonts.bold;
-          else if (el.isItalic) font = fonts.italic;
+          const getFontFamily = (family?: string) => {
+            if (!family) return fonts.Helvetica;
+            const lower = family.toLowerCase();
+            
+            // Comprehensive Serif Mapping
+            if (
+              lower.includes('times') || lower.includes('serif') || lower.includes('georgia') || 
+              lower.includes('garamond') || lower.includes('schoolbook') || lower.includes('baskerville') || 
+              lower.includes('cambria') || lower.includes('perpetua') || lower.includes('merriweather') || 
+              lower.includes('pt serif') || lower.includes('lora') || lower.includes('palatino') || 
+              lower.includes('playfair') || lower.includes('crimson') || lower.includes('arvo') || 
+              lower.includes('cardo') || lower.includes('bitter') || lower.includes('liberation serif') ||
+              lower.includes('baskervville') || lower.includes('bodoni mt') || lower.includes('book antiqua') ||
+              lower.includes('didot') || lower.includes('eb garamond') || lower.includes('libre baskerville') ||
+              lower.includes('domine') || lower.includes('vollkorn') || lower.includes('zilla slab') ||
+              lower.includes('old standard tt') || lower.includes('neuton') || lower.includes('crimson pro')
+            ) return fonts.TimesRoman;
+            
+            // Comprehensive Monospace Mapping
+            if (
+              lower.includes('courier') || lower.includes('mono') || lower.includes('consolas') || 
+              lower.includes('fira') || lower.includes('jetbrains') || lower.includes('source code') || 
+              lower.includes('monaco') || lower.includes('fixed') || lower.includes('oxygen') || 
+              lower.includes('share tech') || lower.includes('nanum gothic coding') || 
+              lower.includes('liberation mono') || lower.includes('inconsolata') || lower.includes('menlo') ||
+              lower.includes('ms gothic') || lower.includes('roboto mono') || lower.includes('space mono') ||
+              lower.includes('ubuntu mono') || lower.includes('ibm plex mono') || lower.includes('courier prime') ||
+              lower.includes('overpass mono') || lower.includes('nova mono') || lower.includes('vt323')
+            ) return fonts.Courier;
+            
+            // Symbols Mapping
+            if (lower.includes('symbol') || lower.includes('math')) return fonts.Symbol;
+            if (
+              lower.includes('zapf') || lower.includes('dingbat') || lower.includes('wingding') || 
+              lower.includes('webding') || lower.includes('icons') || lower.includes('font awesome')
+            ) return fonts.ZapfDingbats;
+
+            // Cursive / Handwriting / Decorative mappings (Fallback to Times or Helvetica based on vibe)
+            if (
+              lower.includes('script') || lower.includes('hand') || lower.includes('pacificos') || 
+              lower.includes('dancing') || lower.includes('lobster') || lower.includes('caveat') ||
+              lower.includes('sacramento') || lower.includes('satisfy') || lower.includes('vibes') ||
+              lower.includes('brush') || lower.includes('comic') || lower.includes('cookie') ||
+              lower.includes('kaushan') || lower.includes('parisienne') || lower.includes('tangerine')
+            ) return fonts.TimesRoman; // Serif vibe for scripts
+            
+            // Default to Sans-Serif (Helvetica) for all others (Roboto, Montserrat, Inter, Open Sans, etc.)
+            return fonts.Helvetica;
+          };
+
+          const familyMatch = getFontFamily(el.fontFamily);
+          let font = familyMatch.normal;
+          if (el.isBold && el.isItalic) font = familyMatch.boldItalic;
+          else if (el.isBold) font = familyMatch.bold;
+          else if (el.isItalic) font = familyMatch.italic;
+
+          let adjustedX = el.x;
+          let textWidth = font.widthOfTextAtSize(el.text, el.fontSize);
+          
+          const rotationAngle = el.rotation || 0;
+          const isRotated = rotationAngle !== 0;
+          const angleRad = (-rotationAngle) * (Math.PI / 180); // PDF CCW
+
+          if (el.backgroundColor && el.backgroundColor !== 'transparent') {
+            const bgRgbColor = hexToRgb(el.backgroundColor);
+            
+            // Desenhar fundo. O Konva está no top-left, então para o PDF-lib 
+            // rotacionar no mesmo ponto, usamos (el.x, height - el.y) e ajustamos para o pivot de baixo.
+            // Para simplicidade e precisão extrema: o pivot do Rect no PDF-lib é o bot-left dele.
+            // Mas o nosso rect ja está no topo-esquerdo rotacionado.
+            // Então vamos mover o pivot para o ponto de rotação.
+            page.drawRectangle({
+              x: el.x,
+              y: height - el.y,
+              width: textWidth,
+              height: -el.fontSize * 1.1, // Altura negativa para descer do topo
+              color: rgb(bgRgbColor.r, bgRgbColor.g, bgRgbColor.b),
+              rotate: isRotated ? degrees(-rotationAngle) : undefined,
+            });
+          }
+
+          // Para o texto, precisamos mover da origem do Konva (Top-Left) para o Baseline do PDF.
+          // Usamos um ratio de 0.8 (ascent habitual) para garantir alinhamento milimétrico.
+          const baseSideShiftX = el.fontSize * 0.8 * Math.sin(angleRad);
+          const baseSideShiftY = -el.fontSize * 0.8 * Math.cos(angleRad);
 
           page.drawText(el.text, {
-            x: el.x,
-            y: height - el.y - el.fontSize, // Adjust for font baseline
+            x: el.x + baseSideShiftX,
+            y: (height - el.y) + baseSideShiftY,
             size: el.fontSize,
             font: font,
             color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
+            rotate: isRotated ? degrees(-rotationAngle) : undefined,
           });
 
           if (el.isUnderline) {
-            const textWidth = font.widthOfTextAtSize(el.text, el.fontSize);
             page.drawLine({
-              start: { x: el.x, y: height - el.y - el.fontSize - 2 },
-              end: { x: el.x + textWidth, y: height - el.y - el.fontSize - 2 },
+              start: { x: adjustedX, y: height - el.y - el.fontSize - 2 },
+              end: { x: adjustedX + textWidth, y: height - el.y - el.fontSize - 2 },
               thickness: 1,
               color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
             });
           }
 
           if (el.url) {
-            const textWidth = font.widthOfTextAtSize(el.text, el.fontSize);
             const link = pdfDoc.context.obj({
               Type: 'Annot',
               Subtype: 'Link',
-              Rect: [el.x, height - el.y - el.fontSize, el.x + textWidth, height - el.y],
+              Rect: [adjustedX, height - el.y - el.fontSize, adjustedX + textWidth, height - el.y],
               Border: [0, 0, 0],
               A: {
                 Type: 'Action',
@@ -599,6 +1020,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
             y: height - el.y - el.height,
             width: el.width,
             height: el.height,
+            rotate: el.rotation ? degrees(-el.rotation) : undefined,
           });
         } else if (el.type === 'line') {
           const rgbColor = hexToRgb(el.color);
@@ -617,12 +1039,29 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
         } else if (el.type === 'rect') {
           const rgbColor = hexToRgb(el.color);
           const opacity = el.isHighlight ? 0.4 : 1;
+          const rotationAngle = el.rotation || 0;
+          const angleRadCCW = (-rotationAngle) * (Math.PI / 180);
+
+          // Para rotacionar ao redor do Top-Left (Konva) usando o PDF-lib (que rotaciona no pivot X,Y):
+          // Precisamos encontrar a coordenada do Bottom-Left NO ESPAÇO ROTACIONADO.
+          // PDF-lib pivot (x,y) -> desenha positivo W, H (sobe em Y).
+          // Se (x,y) for o Bottom-Left, ele rotaciona ali.
+          
+          // Vetor do Top-Left para o Bottom-Left no espaço local: (0, -height)
+          // Rotacionado por angleRadCCW:
+          // dx = 0 * cos(A) - (-H) * sin(A) = H * sin(A)
+          // dy = 0 * sin(A) + (-H) * cos(A) = -H * cos(A)
+          
+          const pivotShiftX = el.height * Math.sin(angleRadCCW);
+          const pivotShiftY = -el.height * Math.cos(angleRadCCW);
+
           page.drawRectangle({
-            x: el.x,
-            y: height - el.y - el.height,
+            x: el.x + pivotShiftX,
+            y: (height - el.y) + pivotShiftY,
             width: el.width,
             height: el.height,
             color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
+            rotate: rotationAngle ? degrees(-rotationAngle) : undefined,
             opacity,
           });
         } else if (el.type === 'ellipse') {
@@ -633,12 +1072,13 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
             xScale: el.radiusX,
             yScale: el.radiusY,
             color: rgb(rgbColor.r, rgbColor.g, rgbColor.b),
+            rotate: el.rotation ? degrees(-el.rotation) : undefined,
           });
         }
       }
 
       const pdfBytes = await pdfDoc.save();
-      const blob = new Blob([pdfBytes], { type: "application/pdf" });
+      const blob = new Blob([pdfBytes as any], { type: "application/pdf" });
       setPdfUrl(URL.createObjectURL(blob));
     } catch (error) {
       console.error("Error editing PDF:", error);
@@ -721,7 +1161,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
         </div>
       ) : (
         <div className="flex-1 flex flex-col">
-          <div className="bg-white border-b border-gray-200 py-3 px-4 sm:px-6 lg:px-8 flex justify-between items-center shadow-sm z-10 relative">
+          <div className="bg-white border-b border-gray-200 py-3 px-4 sm:px-6 lg:px-8 flex justify-between items-center shadow-md z-[50] sticky top-0">
             <div className="flex items-center gap-4">
               <h1 className="text-xl font-bold text-gray-800 hidden md:block">Editar PDF</h1>
               <div className="h-6 w-px bg-gray-300 mx-2 hidden md:block"></div>
@@ -732,7 +1172,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                   onClick={handleUndo}
                   disabled={historyStep === 0}
                   className="p-2 rounded-md transition-colors text-gray-600 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Desfazer"
+                  title="Desfazer (Ctrl+Z)"
                 >
                   <Undo2 className="w-5 h-5" />
                 </button>
@@ -740,7 +1180,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                   onClick={handleRedo}
                   disabled={historyStep === history.length - 1}
                   className="p-2 rounded-md transition-colors text-gray-600 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Refazer"
+                  title="Refazer (Ctrl+Y)"
                 >
                   <Redo2 className="w-5 h-5" />
                 </button>
@@ -788,20 +1228,29 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                 >
                   <Highlighter className="w-5 h-5" />
                 </button>
-                <button
-                  onClick={() => setTool('rect')}
-                  className={cn("p-2 rounded-md transition-colors", tool === 'rect' ? "bg-white shadow-sm text-emerald-600" : "text-gray-600 hover:bg-gray-200")}
-                  title="Retângulo"
-                >
-                  <Square className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={() => setTool('ellipse')}
-                  className={cn("p-2 rounded-md transition-colors", tool === 'ellipse' ? "bg-white shadow-sm text-emerald-600" : "text-gray-600 hover:bg-gray-200")}
-                  title="Elipse"
-                >
-                  <Circle className="w-5 h-5" />
-                </button>
+                <div className="relative group">
+                  <button
+                    className={cn("p-2 rounded-md transition-colors flex items-center justify-center", (tool === 'rect' || tool === 'ellipse') ? "bg-white shadow-sm text-emerald-600" : "text-gray-600 hover:bg-gray-200")}
+                    title="Formas"
+                  >
+                    {tool === 'ellipse' ? <Circle className="w-5 h-5" /> : <Shapes className="w-5 h-5" />}
+                    <ChevronDown className="w-3 h-3 ml-0.5 opacity-50" />
+                  </button>
+                  <div className="absolute hidden group-hover:flex flex-col bg-white border border-gray-200 shadow-md rounded-md top-full left-0 z-50 mt-1 overflow-hidden min-w-[120px]">
+                    <button 
+                      onClick={() => setTool('rect')} 
+                      className={cn("p-2 hover:bg-emerald-50 flex items-center gap-2 text-sm w-full text-left transition-colors", tool === 'rect' ? "text-emerald-700 font-medium bg-emerald-50/50" : "text-gray-700")}
+                    >
+                      <Square className="w-4 h-4"/> Retângulo
+                    </button>
+                    <button 
+                      onClick={() => setTool('ellipse')} 
+                      className={cn("p-2 hover:bg-emerald-50 flex items-center gap-2 text-sm w-full text-left transition-colors", tool === 'ellipse' ? "text-emerald-700 font-medium bg-emerald-50/50" : "text-gray-700")}
+                    >
+                      <Circle className="w-4 h-4"/> Elipse
+                    </button>
+                  </div>
+                </div>
                 <button
                   onClick={() => {
                     setTool('draw');
@@ -879,9 +1328,219 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                       onBlur={() => pushToHistory(elements, hiddenPdfTextIds)}
                       className="bg-gray-50 text-gray-800 px-2 py-1 rounded text-sm w-16 border border-gray-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
                       min="8"
-                      max="120"
                       title="Tamanho da fonte"
                     />
+                    <select
+                      value={(elements.find(el => el.id === selectedId) as TextElement).fontFamily || 'Helvetica'}
+                      onChange={(e) => {
+                        setElements(elements.map(el => 
+                          el.id === selectedId ? { ...el, fontFamily: e.target.value } : el
+                        ));
+                      }}
+                      onBlur={() => pushToHistory(elements, hiddenPdfTextIds)}
+                      className="bg-gray-50 text-gray-800 px-2 py-1 rounded text-sm w-32 border border-gray-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                      title="Fonte"
+                    >
+                      <option value="Helvetica">Helvetica / Arial (Padrão)</option>
+                      <option value="Abril Fatface">Abril Fatface</option>
+                      <option value="Alex Brush">Alex Brush</option>
+                      <option value="Algerian">Algerian</option>
+                      <option value="Allura">Allura</option>
+                      <option value="American Typewriter">American Typewriter</option>
+                      <option value="Andale Mono">Andale Mono</option>
+                      <option value="Apple Chancery">Apple Chancery</option>
+                      <option value="Arial">Arial</option>
+                      <option value="Arial Black">Arial Black</option>
+                      <option value="Arimo">Arimo</option>
+                      <option value="Arizonia">Arizonia</option>
+                      <option value="Arvo">Arvo</option>
+                      <option value="Avenir">Avenir</option>
+                      <option value="Bangers">Bangers</option>
+                      <option value="Barlow">Barlow</option>
+                      <option value="Baskerville">Baskerville</option>
+                      <option value="Bauhaus 93">Bauhaus 93</option>
+                      <option value="Bitter">Bitter</option>
+                      <option value="Blackadder ITC">Blackadder</option>
+                      <option value="Bodoni MT">Bodoni</option>
+                      <option value="Book Antiqua">Book Antiqua</option>
+                      <option value="Broadway">Broadway</option>
+                      <option value="Brush Script MT">Brush Script</option>
+                      <option value="Cabin">Cabin</option>
+                      <option value="Calibri">Calibri</option>
+                      <option value="Cambria">Cambria</option>
+                      <option value="Candara">Candara</option>
+                      <option value="Cardo">Cardo</option>
+                      <option value="Caslon">Caslon MT</option>
+                      <option value="Caveat">Caveat</option>
+                      <option value="Century Gothic">Century Gothic</option>
+                      <option value="Century Schoolbook">Century Schoolbook</option>
+                      <option value="Chiller">Chiller</option>
+                      <option value="Cinzel">Cinzel</option>
+                      <option value="Comic Sans MS">Comic Sans</option>
+                      <option value="Consolas">Consolas</option>
+                      <option value="Constantia">Constantia</option>
+                      <option value="Cookie">Cookie</option>
+                      <option value="Cooper Black">Cooper Black</option>
+                      <option value="Copperplate">Copperplate</option>
+                      <option value="Courgette">Courgette</option>
+                      <option value="Courier">Courier</option>
+                      <option value="Courier New">Courier New</option>
+                      <option value="Courier Prime">Courier Prime</option>
+                      <option value="Creepster">Creepster</option>
+                      <option value="Crimson Pro">Crimson Pro</option>
+                      <option value="Crimson Text">Crimson Text</option>
+                      <option value="Damion">Damion</option>
+                      <option value="Dancing Script">Dancing Script</option>
+                      <option value="Didot">Didot</option>
+                      <option value="Domine">Domine</option>
+                      <option value="Dosis">Dosis</option>
+                      <option value="EB Garamond">EB Garamond</option>
+                      <option value="Exo 2">Exo 2</option>
+                      <option value="Fira Code">Fira Code</option>
+                      <option value="Fira Mono">Fira Mono</option>
+                      <option value="Fira Sans">Fira Sans</option>
+                      <option value="Font Awesome">Font Awesome</option>
+                      <option value="Franklin Gothic Medium">Franklin Gothic</option>
+                      <option value="Frederickat">Fredoka One</option>
+                      <option value="Fredericka the Great">Fredericka the Great</option>
+                      <option value="Freestyle Script">Freestyle Script</option>
+                      <option value="Frutiger">Frutiger</option>
+                      <option value="Futura">Futura</option>
+                      <option value="Futura Inline">Futura Display</option>
+                      <option value="Garamond">Garamond</option>
+                      <option value="Geneva">Geneva</option>
+                      <option value="Georgia">Georgia</option>
+                      <option value="Gill Sans">Gill Sans</option>
+                      <option value="Goudy Stout">Goudy Stout</option>
+                      <option value="Great Vibes">Great Vibes</option>
+                      <option value="Handlee">Handlee</option>
+                      <option value="Haettenschweiler">Haettenschweiler</option>
+                      <option value="Heebo">Heebo</option>
+                      <option value="Helvetica Neue">Helvetica Neue</option>
+                      <option value="Hoefler Text">Hoefler Text</option>
+                      <option value="IBM Plex Mono">IBM Plex Mono</option>
+                      <option value="Impact">Impact</option>
+                      <option value="Inconsolata">Inconsolata</option>
+                      <option value="Indie Flower">Indie Flower</option>
+                      <option value="Inter">Inter</option>
+                      <option value="JetBrains Mono">JetBrains Mono</option>
+                      <option value="JokerMan">JokerMan</option>
+                      <option value="Josefin Sans">Josefin Sans</option>
+                      <option value="Josefin Slab">Josefin Slab</option>
+                      <option value="Kanit">Kanit</option>
+                      <option value="Karla">Karla</option>
+                      <option value="Kaushan Script">Kaushan Script</option>
+                      <option value="Lato">Lato</option>
+                      <option value="Libre Baskerville">Libre Baskerville</option>
+                      <option value="Lobster">Lobster</option>
+                      <option value="Lobster Two">Lobster Two</option>
+                      <option value="Lora">Lora</option>
+                      <option value="Lucida Bright">Lucida Bright</option>
+                      <option value="Lucida Console">Lucida Console</option>
+                      <option value="Lucida Handwriting">Lucida Handwriting</option>
+                      <option value="Lucida Sans Unicode">Lucida Sans</option>
+                      <option value="Luckiest Guy">Luckiest Guy</option>
+                      <option value="Material Icons">Material Icons</option>
+                      <option value="Menlo">Menlo</option>
+                      <option value="Merriweather">Merriweather</option>
+                      <option value="Mistral">Mistral</option>
+                      <option value="Monaco">Monaco</option>
+                      <option value="Monoton">Monoton</option>
+                      <option value="Montserrat">Montserrat</option>
+                      <option value="Mr Dafoe">Mr Dafoe</option>
+                      <option value="MS Gothic">MS Gothic</option>
+                      <option value="Mukta">Mukta</option>
+                      <option value="Myriad Pro">Myriad Pro</option>
+                      <option value="Nanum Gothic">Nanum Gothic</option>
+                      <option value="Nanum Gothic Coding">Nanum Gothic Coding</option>
+                      <option value="Neuton">Neuton</option>
+                      <option value="Noto Sans">Noto Sans</option>
+                      <option value="Noto Serif">Noto Serif</option>
+                      <option value="Nova Mono">Nova Mono</option>
+                      <option value="Nunito">Nunito</option>
+                      <option value="Old English Text MT">Old English</option>
+                      <option value="Old Standard TT">Old Standard TT</option>
+                      <option value="Open Sans">Open Sans</option>
+                      <option value="Optima">Optima</option>
+                      <option value="Oswald">Oswald</option>
+                      <option value="Overpass Mono">Overpass Mono</option>
+                      <option value="Oxygen Mono">Oxygen Mono</option>
+                      <option value="Pacifico">Pacifico</option>
+                      <option value="Palatino">Palatino</option>
+                      <option value="Papyrus">Papyrus</option>
+                      <option value="Parisienne">Parisienne</option>
+                      <option value="Passion One">Passion One</option>
+                      <option value="PT Mono">PT Mono</option>
+                      <option value="PT Sans">PT Sans</option>
+                      <option value="PT Serif">PT Serif</option>
+                      <option value="Patua One">Patua One</option>
+                      <option value="Perpetua">Perpetua</option>
+                      <option value="Petit Formal Script">Petit Formal Script</option>
+                      <option value="Pinyon Script">Pinyon Script</option>
+                      <option value="Playbill">Playbill</option>
+                      <option value="Playfair Display">Playfair Display</option>
+                      <option value="Poiret One">Poiret One</option>
+                      <option value="Poppins">Poppins</option>
+                      <option value="Quicksand">Quicksand</option>
+                      <option value="Raleway">Raleway</option>
+                      <option value="Ravie">Ravie</option>
+                      <option value="Righteous">Righteous</option>
+                      <option value="Roboto">Roboto</option>
+                      <option value="Roboto Mono">Roboto Mono</option>
+                      <option value="Rochester">Rochester</option>
+                      <option value="Rockwell">Rockwell</option>
+                      <option value="Sacramento">Sacramento</option>
+                      <option value="Satisfy">Satisfy</option>
+                      <option value="Segoe UI">Segoe UI</option>
+                      <option value="Shadows Into Light">Shadows Into Light</option>
+                      <option value="Share Tech Mono">Share Tech Mono</option>
+                      <option value="Showcard Gothic">Showcard Gothic</option>
+                      <option value="Snap ITC">Snap ITC</option>
+                      <option value="Snell Roundhand">Snell Roundhand</option>
+                      <option value="Source Code Pro">Source Code Pro</option>
+                      <option value="Source Sans Pro">Source Sans Pro</option>
+                      <option value="Space Mono">Space Mono</option>
+                      <option value="Special Elite">Special Elite</option>
+                      <option value="Stencil">Stencil</option>
+                      <option value="Symbol">Símbolos Matemáticos</option>
+                      <option value="Tahoma">Tahoma</option>
+                      <option value="Tangerine">Tangerine</option>
+                      <option value="TimesRoman">Times New Roman</option>
+                      <option value="Titillium Web">Titillium Web</option>
+                      <option value="Trebuchet MS">Trebuchet MS</option>
+                      <option value="Ubuntu">Ubuntu</option>
+                      <option value="Ubuntu Mono">Ubuntu Mono</option>
+                      <option value="Univers">Univers</option>
+                      <option value="Verdana">Verdana</option>
+                      <option value="Vivaldi">Vivaldi</option>
+                      <option value="Vollkorn">Vollkorn</option>
+                      <option value="VT323">VT323 (Retro)</option>
+                      <option value="Webdings">Webdings (Ícones)</option>
+                      <option value="Wide Latin">Wide Latin</option>
+                      <option value="Wingdings">Wingdings 1</option>
+                      <option value="Wingdings 2">Wingdings 2</option>
+                      <option value="Wingdings 3">Wingdings 3</option>
+                      <option value="Work Sans">Work Sans</option>
+                      <option value="Yellowtail">Yellowtail</option>
+                      <option value="ZapfDingbats">Universal Dingbats</option>
+                      <option value="Zapfino">Zapfino</option>
+                      <option value="Zilla Slab">Zilla Slab</option>
+                    </select>
+                    <div className="h-4 w-px bg-gray-300 mx-1"></div>
+                    <div className="flex items-center gap-1 border border-gray-200 rounded px-1" title="Cor de fundo do texto">
+                      <Highlighter size={14} className="text-gray-500"/>
+                      <input 
+                        type="color" 
+                        value={(elements.find(el => el.id === selectedId) as TextElement).backgroundColor || '#ffffff'} 
+                        onChange={(e) => toggleTextFormat('backgroundColor', e.target.value)}
+                        className="w-5 h-5 cursor-pointer border-0 p-0"
+                      />
+                      <button 
+                        onClick={() => toggleTextFormat('backgroundColor', 'transparent')} 
+                        className="p-0.5 rounded text-red-500 hover:bg-red-50"
+                        title="Transparente"
+                      ><X size={14}/></button>
+                    </div>
                     <div className="h-4 w-px bg-gray-300 mx-1"></div>
                     <button 
                       onClick={() => toggleTextFormat('isBold')} 
@@ -907,6 +1566,24 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                       className={cn("p-1 rounded text-gray-600 hover:bg-gray-100", (elements.find(el => el.id === selectedId) as TextElement).url ? "bg-gray-200 text-blue-600" : "")}
                       title="Link"
                     ><LinkIcon size={16}/></button>
+                    <div className="h-4 w-px bg-gray-300 mx-1"></div>
+                    <div className="flex items-center gap-1" title="Rotação (Graus)">
+                      <RotateCw size={14} className="text-gray-500"/>
+                      <input
+                        type="number"
+                        value={Math.round((elements.find(el => el.id === selectedId) as TextElement).rotation || 0)}
+                        onChange={(e) => {
+                          setElements(elements.map(el => 
+                            el.id === selectedId ? { ...el, rotation: Number(e.target.value) } : el
+                          ));
+                        }}
+                        onBlur={() => pushToHistory(elements, hiddenPdfTextIds)}
+                        className="bg-gray-50 text-gray-800 px-1 py-1 rounded text-sm w-16 border border-gray-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                        min="-360"
+                        max="360"
+                      />
+                      <span className="text-gray-500 text-xs font-medium">°</span>
+                    </div>
                   </div>
                 )}
                 
@@ -964,57 +1641,59 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                       style={{ cursor: tool === 'text' ? 'text' : tool === 'draw' ? 'crosshair' : 'default' }}
                     >
                       <Layer>
-                        {tool === 'magic-edit' && pdfTexts.filter(pt => !hiddenPdfTextIds.includes(pt.id)).map((pt) => (
-                          <Rect
-                            key={pt.id}
-                            x={pt.x - 2}
-                            y={pt.y - 2}
-                            width={pt.width + 4}
-                            height={pt.height + 4}
-                            fill={hoveredMagicId === pt.id ? "rgba(16, 185, 129, 0.2)" : "rgba(59, 130, 246, 0.1)"}
-                            stroke={hoveredMagicId === pt.id ? "#10b981" : "#3b82f6"}
-                            strokeWidth={hoveredMagicId === pt.id ? 2 : 1}
-                            dash={hoveredMagicId === pt.id ? [] : [4, 4]}
-                            cornerRadius={4}
-                            onClick={() => handleMagicEditClick(pt)}
-                            onTap={() => handleMagicEditClick(pt)}
-                            onMouseEnter={(e) => {
-                              const container = e.target.getStage().container();
-                              container.style.cursor = 'pointer';
-                              setHoveredMagicId(pt.id);
-                            }}
-                            onMouseLeave={(e) => {
-                              const container = e.target.getStage().container();
-                              container.style.cursor = 'default';
-                              setHoveredMagicId(null);
-                            }}
-                          />
-                        ))}
+                        {tool === 'magic-edit' && pdfTexts.filter(pt => !hiddenPdfTextIds.includes(pt.id)).map((pt) => {
+                          const px = 0;
+                          const py = 0;
+                          const aRad = (pt.rotation || 0) * (Math.PI / 180);
+                          const cA = Math.cos(aRad);
+                          const sA = Math.sin(aRad);
+                          const dx = (-px) * cA - (-py) * sA;
+                          const dy = (-px) * sA + (-py) * cA;
+                          
+                          return (
+                            <Rect
+                              key={pt.id}
+                              x={pt.x + dx}
+                              y={pt.y + dy}
+                              width={pt.width + (px * 2)}
+                              height={pt.height + (py * 2)}
+                              rotation={pt.rotation || 0}
+                              fill={hoveredMagicId === pt.id ? "rgba(16, 185, 129, 0.2)" : "rgba(59, 130, 246, 0.1)"}
+                              stroke={hoveredMagicId === pt.id ? "#10b981" : "#3b82f6"}
+                              strokeWidth={hoveredMagicId === pt.id ? 2 : 1}
+                              dash={hoveredMagicId === pt.id ? [] : [4, 4]}
+                              cornerRadius={0}
+                              onClick={() => handleMagicEditClick(pt)}
+                              onTap={() => handleMagicEditClick(pt)}
+                              onMouseEnter={(e) => {
+                                const container = e.target.getStage().container();
+                                container.style.cursor = 'pointer';
+                                setHoveredMagicId(pt.id);
+                              }}
+                              onMouseLeave={(e) => {
+                                const container = e.target.getStage().container();
+                                container.style.cursor = 'default';
+                                setHoveredMagicId(null);
+                              }}
+                            />
+                          );
+                        })}
                         {currentPageElements.map((el) => {
                           if (el.type === 'text') {
                             return (
-                              <Text
+                              <RotatableText
                                 key={el.id}
-                                x={el.x}
-                                y={el.y}
-                                text={el.text}
-                                fontSize={el.fontSize}
-                                fontFamily={el.fontFamily || 'Helvetica'}
-                                fontStyle={`${el.isItalic ? 'italic ' : ''}${el.isBold ? 'bold' : 'normal'}`}
-                                textDecoration={el.isUnderline ? 'underline' : ''}
-                                fill={el.url ? '#2563eb' : el.color}
-                                draggable={tool === 'select'}
-                                onClick={() => tool === 'select' && setSelectedId(el.id)}
-                                onTap={() => tool === 'select' && setSelectedId(el.id)}
-                                onDragEnd={(e) => {
+                                element={el}
+                                tool={tool}
+                                isSelected={selectedId === el.id}
+                                onSelect={() => tool === 'select' && setSelectedId(el.id)}
+                                onChange={(newAttrs: any) => {
                                   const newElements = elements.map(item => 
-                                    item.id === el.id ? { ...item, x: e.target.x(), y: e.target.y() } : item
+                                    item.id === el.id ? newAttrs : item
                                   );
                                   setElements(newElements);
                                   pushToHistory(newElements, hiddenPdfTextIds);
                                 }}
-                                stroke={selectedId === el.id ? '#10b981' : undefined}
-                                strokeWidth={selectedId === el.id ? 1 : 0}
                               />
                             );
                           } else if (el.type === 'image') {
@@ -1058,53 +1737,131 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                               />
                             );
                           } else if (el.type === 'rect') {
+                            const isSelected = selectedId === el.id;
                             return (
-                              <Rect
-                                key={el.id}
-                                x={el.x}
-                                y={el.y}
-                                width={el.width}
-                                height={el.height}
-                                fill={el.color}
-                                draggable={el.isWhiteout ? false : tool === 'select'}
-                                listening={!el.isWhiteout}
-                                onClick={el.isWhiteout ? undefined : () => tool === 'select' && setSelectedId(el.id)}
-                                onTap={el.isWhiteout ? undefined : () => tool === 'select' && setSelectedId(el.id)}
-                                onDragEnd={(e) => {
-                                  if (el.isWhiteout) return;
-                                  const newElements = elements.map(item => 
-                                    item.id === el.id ? { ...item, x: e.target.x(), y: e.target.y() } : item
-                                  );
-                                  setElements(newElements);
-                                  pushToHistory(newElements, hiddenPdfTextIds);
-                                }}
-                                stroke={selectedId === el.id && !el.isWhiteout ? '#10b981' : undefined}
-                                strokeWidth={selectedId === el.id && !el.isWhiteout ? 2 : 0}
-                                globalCompositeOperation={el.isHighlight ? 'multiply' : 'source-over'}
-                              />
+                              <React.Fragment key={el.id}>
+                                <Rect
+                                  x={el.x}
+                                  y={el.y}
+                                  width={el.width}
+                                  height={el.height}
+                                  rotation={el.rotation || 0}
+                                  fill={el.color}
+                                  draggable={el.isWhiteout ? false : tool === 'select'}
+                                  listening={!el.isWhiteout}
+                                  onClick={el.isWhiteout ? undefined : () => tool === 'select' && setSelectedId(el.id)}
+                                  onTap={el.isWhiteout ? undefined : () => tool === 'select' && setSelectedId(el.id)}
+                                  ref={isSelected ? (node) => {
+                                    if (node && trRef.current) {
+                                      trRef.current.nodes([node]);
+                                      trRef.current.getLayer().batchDraw();
+                                    }
+                                  } : null}
+                                  onDragEnd={(e) => {
+                                    if (el.isWhiteout) return;
+                                    const newElements = elements.map(item => 
+                                      item.id === el.id ? { ...item, x: e.target.x(), y: e.target.y() } : item
+                                    );
+                                    setElements(newElements);
+                                    pushToHistory(newElements, hiddenPdfTextIds);
+                                  }}
+                                  onTransformEnd={(e) => {
+                                    const node = e.target;
+                                    const scaleX = node.scaleX();
+                                    const scaleY = node.scaleY();
+                                    node.scaleX(1);
+                                    node.scaleY(1);
+                                    const newElements = elements.map(item => 
+                                      item.id === el.id ? { 
+                                        ...item, 
+                                        x: node.x(), 
+                                        y: node.y(), 
+                                        width: Math.max(1, node.width() * scaleX),
+                                        height: Math.max(1, node.height() * scaleY),
+                                        rotation: node.rotation()
+                                      } : item
+                                    );
+                                    setElements(newElements);
+                                    pushToHistory(newElements, hiddenPdfTextIds);
+                                  }}
+                                  globalCompositeOperation={el.isHighlight ? 'multiply' : 'source-over'}
+                                />
+                                {isSelected && tool === 'select' && !el.isWhiteout && (
+                                  <Transformer
+                                    ref={trRef}
+                                    rotateEnabled={true}
+                                    enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right', 'top-center', 'bottom-center', 'left-middle', 'right-middle']}
+                                    boundBoxFunc={(oldBox, newBox) => {
+                                      if (Math.abs(newBox.width) < 1 || Math.abs(newBox.height) < 1) {
+                                        return oldBox;
+                                      }
+                                      return newBox;
+                                    }}
+                                  />
+                                )}
+                              </React.Fragment>
                             );
                           } else if (el.type === 'ellipse') {
+                            const isSelected = selectedId === el.id;
                             return (
-                              <Ellipse
-                                key={el.id}
-                                x={el.x + el.radiusX} // Konva ellipse x,y is center
-                                y={el.y + el.radiusY}
-                                radiusX={el.radiusX}
-                                radiusY={el.radiusY}
-                                fill={el.color}
-                                draggable={tool === 'select'}
-                                onClick={() => tool === 'select' && setSelectedId(el.id)}
-                                onTap={() => tool === 'select' && setSelectedId(el.id)}
-                                onDragEnd={(e) => {
-                                  const newElements = elements.map(item => 
-                                    item.id === el.id ? { ...item, x: e.target.x() - el.radiusX, y: e.target.y() - el.radiusY } : item
-                                  );
-                                  setElements(newElements);
-                                  pushToHistory(newElements, hiddenPdfTextIds);
-                                }}
-                                stroke={selectedId === el.id ? '#10b981' : undefined}
-                                strokeWidth={selectedId === el.id ? 2 : 0}
-                              />
+                              <React.Fragment key={el.id}>
+                                <Ellipse
+                                  x={el.x + el.radiusX}
+                                  y={el.y + el.radiusY}
+                                  radiusX={el.radiusX}
+                                  radiusY={el.radiusY}
+                                  rotation={el.rotation || 0}
+                                  fill={el.color}
+                                  draggable={tool === 'select'}
+                                  onClick={() => tool === 'select' && setSelectedId(el.id)}
+                                  onTap={() => tool === 'select' && setSelectedId(el.id)}
+                                  ref={isSelected ? (node) => {
+                                    if (node && trRef.current) {
+                                      trRef.current.nodes([node]);
+                                      trRef.current.getLayer().batchDraw();
+                                    }
+                                  } : null}
+                                  onDragEnd={(e) => {
+                                    const newElements = elements.map(item => 
+                                      item.id === el.id ? { ...item, x: e.target.x() - el.radiusX, y: e.target.y() - el.radiusY } : item
+                                    );
+                                    setElements(newElements);
+                                    pushToHistory(newElements, hiddenPdfTextIds);
+                                  }}
+                                  onTransformEnd={(e) => {
+                                    const node = e.target as any;
+                                    const scaleX = node.scaleX();
+                                    const scaleY = node.scaleY();
+                                    node.scaleX(1);
+                                    node.scaleY(1);
+                                    const newElements = elements.map(item => 
+                                      item.id === el.id ? { 
+                                        ...item, 
+                                        x: node.x() - node.radiusX() * scaleX, 
+                                        y: node.y() - node.radiusY() * scaleY, 
+                                        radiusX: Math.max(1, node.radiusX() * scaleX),
+                                        radiusY: Math.max(1, node.radiusY() * scaleY),
+                                        rotation: node.rotation()
+                                      } : item
+                                    );
+                                    setElements(newElements);
+                                    pushToHistory(newElements, hiddenPdfTextIds);
+                                  }}
+                                />
+                                {isSelected && tool === 'select' && (
+                                  <Transformer
+                                    ref={trRef}
+                                    rotateEnabled={true}
+                                    enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+                                    boundBoxFunc={(oldBox, newBox) => {
+                                      if (Math.abs(newBox.width) < 1 || Math.abs(newBox.height) < 1) {
+                                        return oldBox;
+                                      }
+                                      return newBox;
+                                    }}
+                                  />
+                                )}
+                              </React.Fragment>
                             );
                           }
                           return null;
@@ -1123,16 +1880,34 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                   onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                   disabled={currentPage === 1}
                   className="p-1 hover:bg-gray-700 rounded-full disabled:opacity-50"
+                  title="Página Anterior"
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
-                <span className="text-sm font-medium">
-                  Página {currentPage} de {numPages}
-                </span>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  Página 
+                  <input 
+                    type="number" 
+                    value={currentPage}
+                    onChange={(e) => {
+                      let p = parseInt(e.target.value);
+                      if (!isNaN(p)) {
+                        if (p < 1) p = 1;
+                        if (p > numPages) p = numPages;
+                        setCurrentPage(p);
+                      }
+                    }}
+                    className="w-14 text-center bg-gray-800 border border-gray-600 rounded px-1 py-0.5 text-white focus:outline-none focus:border-emerald-500 hide-arrows"
+                    min={1}
+                    max={numPages}
+                  /> 
+                  de {numPages}
+                </div>
                 <button 
                   onClick={() => setCurrentPage(Math.min(numPages, currentPage + 1))}
                   disabled={currentPage === numPages}
                   className="p-1 hover:bg-gray-700 rounded-full disabled:opacity-50"
+                  title="Próxima Página"
                 >
                   <ChevronRight className="w-5 h-5" />
                 </button>
