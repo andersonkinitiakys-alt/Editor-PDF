@@ -7,6 +7,11 @@ import { cn } from "../lib/utils";
 import { Stage, Layer, Text, Image as KonvaImage, Line, Transformer, Rect, Ellipse, Label, Tag } from "react-konva";
 import useImage from "use-image";
 
+import { fontManager } from "../lib/fontManager";
+import { FONT_REGISTRY } from "../lib/fontRegistry";
+import FontPicker from "../components/FontPicker";
+import { normalizeToHex, getRgbDistance } from "../lib/colorUtils";
+
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 type Tool = 'select' | 'text' | 'draw' | 'image' | 'eraser' | 'highlight' | 'rect' | 'ellipse' | 'magic-edit';
@@ -64,6 +69,48 @@ interface EllipseElement extends BaseElement {
 }
 
 type PdfElement = TextElement | ImageElement | LineElement | RectElement | EllipseElement;
+
+
+const getFontData = async (fontFamily: string): Promise<Uint8Array | null> => {
+  try {
+    const formattedName = fontFamily.replace(/\s+/g, '+');
+    const cssUrl = `https://fonts.googleapis.com/css?family=${formattedName}:400,700`;
+    const cssContent = await fetch(cssUrl).then(res => res.text());
+    
+    const urlMatch = cssContent.match(/url\((.*?)\)/);
+    if (!urlMatch) return null;
+    
+    const fontUrl = urlMatch[1].replace(/['"]/g, '');
+    const fontData = await fetch(fontUrl).then(res => res.arrayBuffer());
+    return new Uint8Array(fontData);
+  } catch (e) {
+    console.error(`Error fetching font ${fontFamily}:`, e);
+    return null;
+  }
+};
+
+const getBestMatchingFont = (original: string): string => {
+  if (!original) return 'Helvetica';
+  const lower = original.toLowerCase();
+  
+  // Try to find an exact or close match in our FONT_REGISTRY
+  for (const font of FONT_REGISTRY) {
+    if (lower.includes(font.family.toLowerCase()) || font.family.toLowerCase().includes(lower)) {
+      return font.family;
+    }
+  }
+  
+  // Mapping for common PDF font keywords to categories if no direct match
+  if (lower.includes('helvetica') || lower.includes('arial') || lower.includes('sans')) return 'Roboto';
+  if (lower.includes('times') || lower.includes('serif') || lower.includes('georgia')) return 'Playfair Display';
+  if (lower.includes('courier') || lower.includes('mono') || lower.includes('code')) return 'Fira Code';
+  if (lower.includes('script') || lower.includes('hand')) return 'Pacifico';
+  if (lower.includes('symbol')) return 'Symbol';
+  if (lower.includes('zapf') || lower.includes('dingbat')) return 'ZapfDingbats';
+
+  // Default fallback
+  return 'Inter';
+};
 
 const URLImage = ({ image, isSelected, onSelect, onChange }: any) => {
   const [img] = useImage(image.src);
@@ -126,7 +173,7 @@ const URLImage = ({ image, isSelected, onSelect, onChange }: any) => {
   );
 };
 
-const RotatableText = ({ element, tool, isSelected, onSelect, onChange }: any) => {
+const RotatableText = ({ element, tool, isSelected, onSelect, onChange, previewFont }: any) => {
   const shapeRef = useRef<any>(null);
   const trRef = useRef<any>(null);
 
@@ -170,7 +217,7 @@ const RotatableText = ({ element, tool, isSelected, onSelect, onChange }: any) =
         <Text
           text={element.text}
           fontSize={element.fontSize}
-          fontFamily={element.fontFamily || 'Helvetica'}
+          fontFamily={(isSelected && previewFont) ? previewFont : (element.fontFamily || 'Helvetica')}
           fontStyle={`${element.isItalic ? 'italic ' : ''}${element.isBold ? 'bold' : 'normal'}`}
           textDecoration={element.isUnderline ? 'underline' : ''}
           fill={element.url ? '#2563eb' : element.color}
@@ -203,6 +250,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
   const [tool, setTool] = useState<Tool>(initialTool);
   const [elements, setElements] = useState<PdfElement[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [previewFont, setPreviewFont] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [color, setColor] = useState('#000000');
   const [scale, setScale] = useState(1);
@@ -219,27 +267,39 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
   const stageRef = useRef<any>(null);
   const trRef = useRef<any>(null);
 
+  // Preload core fonts
   useEffect(() => {
-    const usedFonts = new Set<string>();
+    fontManager.preloadCoreFonts();
+  }, []);
+
+  // Update dynamic Google Fonts Loading to use FontManager
+  useEffect(() => {
     elements.forEach(el => {
-      if (el.type === 'text' && el.fontFamily && !['Helvetica', 'TimesRoman', 'Courier', 'Symbol', 'ZapfDingbats'].includes(el.fontFamily)) {
-        usedFonts.add(el.fontFamily);
+      if (el.type === 'text' && el.fontFamily) {
+        fontManager.loadFont(el.fontFamily, el.isBold ? '700' : '400', el.isItalic);
       }
     });
-
-    if (usedFonts.size > 0) {
-      const fontFamilies = Array.from(usedFonts).map(f => f.replace(/\s+/g, '+')).join('|');
-      const linkId = 'dynamic-google-fonts';
-      let link = document.getElementById(linkId) as HTMLLinkElement;
-      if (!link) {
-        link = document.createElement('link');
-        link.id = linkId;
-        link.rel = 'stylesheet';
-        document.head.appendChild(link);
-      }
-      link.href = `https://fonts.googleapis.com/css?family=${fontFamilies}&display=swap`;
-    }
   }, [elements]);
+
+  // Redraw stage when any font finishes loading
+  useEffect(() => {
+    const handleFontsLoaded = () => {
+      if (stageRef.current) {
+        stageRef.current.batchDraw();
+      }
+    };
+    
+    // Check if the API is available
+    if (typeof document !== 'undefined' && (document as any).fonts) {
+      (document as any).fonts.addEventListener('loadingdone', handleFontsLoaded);
+    }
+    
+    return () => {
+      if (typeof document !== 'undefined' && (document as any).fonts) {
+        (document as any).fonts.removeEventListener('loadingdone', handleFontsLoaded);
+      }
+    };
+  }, []);
 
   const updateHistoryStep = useCallback((step: number) => {
     setHistoryStep(step);
@@ -456,6 +516,8 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
         const [v1x, v1y] = viewport.convertToViewportPoint(item.dirX, item.dirY);
         const screenAngle = Math.atan2(v1y - v0y, v1x - v0x) * (180 / Math.PI);
         
+        const { textColor } = detectColorsFromCanvas(item);
+        
         return {
           id: `page-${currentPage}-text-${index}-${item.x}-${item.y}`,
           str: item.str,
@@ -466,6 +528,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
           fontSize: item.fontSize,
           fontFamily: item.fontFamily,
           rotation: screenAngle,
+          color: textColor,
           isBold: item.fontFamily?.toLowerCase().includes('bold') || false,
           isItalic: item.fontFamily?.toLowerCase().includes('italic') || item.fontFamily?.toLowerCase().includes('oblique') || false,
         };
@@ -603,15 +666,10 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
     setIsDrawing(false);
   };
 
-  const handleMagicEditClick = (pt: any) => {
-    if (tool !== 'magic-edit') return;
-    
-    // Precisão Máxima: Zero Padding para cobertura 100% "colada" no texto original.
-    const paddingX = 0; 
-    const paddingY = 0;
-
-    // Amostragem por Área (Grade 7x7): Captura 49 pontos para detectar a cor com maior porcentagem (moda).
+  const detectColorsFromCanvas = useCallback((pt: any, px: number = 0, py: number = 0) => {
     let bgColor = '#ffffff';
+    let textColor = '#000000';
+    
     try {
       const canvases = document.querySelectorAll('.react-pdf__Page__canvas');
       if (canvases.length > 0) {
@@ -619,42 +677,91 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         
         if (ctx) {
-          const colors: { [hex: string]: number } = {};
           const angleRad = (pt.rotation || 0) * (Math.PI / 180);
           const cosA = Math.cos(angleRad);
           const sinA = Math.sin(angleRad);
+          
+          // 1. Calcular o AABB (Axis-Aligned Bounding Box) para leitura Single-Pass
+          // Pontos do retângulo rotacionado (locais -> globais)
+          const rectWidth = pt.width + px * 2;
+          const rectHeight = pt.height + py * 2;
+          
+          const corners = [
+            { x: -px, y: -py },
+            { x: pt.width + px, y: -py },
+            { x: pt.width + px, y: pt.height + py },
+            { x: -px, y: pt.height + py }
+          ].map(c => ({
+            x: (pt.x * scale) + (c.x * cosA - c.y * sinA) * scale,
+            y: (pt.y * scale) + (c.x * sinA + c.y * cosA) * scale
+          }));
 
-          // Criar uma grade 7x7 sobre a área do texto (incluindo margem de padding)
-          for (let row = 0; row < 7; row++) {
-            for (let col = 0; col < 7; col++) {
-              // Coordenadas locais na grade (de -paddingX/Y até width/height + paddingX/Y)
-              const lx = -paddingX + (col * (pt.width + paddingX * 2) / 6);
-              const ly = -paddingY + (row * (pt.height + paddingY * 2) / 6);
-              
-              // Rotacionar para espaço global
-              const globalDX = lx * cosA - ly * sinA;
-              const globalDY = lx * sinA + ly * cosA;
-              
-              const sampleX = Math.max(0, (pt.x * scale) + globalDX * scale);
-              const sampleY = Math.max(0, (pt.y * scale) + globalDY * scale);
-              
-              const pixel = ctx.getImageData(sampleX * devicePixelRatio, sampleY * devicePixelRatio, 1, 1).data;
-              if (pixel[3] > 0) {
-                const hex = `#${pixel[0].toString(16).padStart(2, '0')}${pixel[1].toString(16).padStart(2, '0')}${pixel[2].toString(16).padStart(2, '0')}`;
-                colors[hex] = (colors[hex] || 0) + 1;
+          const minX = Math.floor(Math.min(...corners.map(c => c.x)) * devicePixelRatio);
+          const minY = Math.floor(Math.min(...corners.map(c => c.y)) * devicePixelRatio);
+          const maxX = Math.ceil(Math.max(...corners.map(c => c.x)) * devicePixelRatio);
+          const maxY = Math.ceil(Math.max(...corners.map(c => c.y)) * devicePixelRatio);
+          
+          const width = maxX - minX;
+          const height = maxY - minY;
+
+          if (width > 0 && height > 0 && width < 2000 && height < 2000) {
+            // Leitura Single-Pass da área inteira
+            const imageData = ctx.getImageData(minX, minY, width, height).data;
+            const colors: { [rgba: string]: number } = {};
+            
+            // Amostragem estatística dentro do AABB (pula pixels se muito grande)
+            const step = width * height > 10000 ? 2 : 1; 
+            
+            for (let y = 0; y < height; y += step) {
+              for (let x = 0; x < width; x += step) {
+                const idx = (y * width + x) * 4;
+                const r = imageData[idx];
+                const g = imageData[idx + 1];
+                const b = imageData[idx + 2];
+                const a = imageData[idx + 3] / 255;
+                
+                if (a > 0.05) { // Ignorar totalmente transparente
+                  const rgba = `rgba(${r},${g},${b},${a.toFixed(2)})`;
+                  colors[rgba] = (colors[rgba] || 0) + 1;
+                }
               }
             }
-          }
 
-          const sortedColors = Object.entries(colors).sort((a, b) => b[1] - a[1]);
-          if (sortedColors.length > 0) {
-            bgColor = sortedColors[0][0];
+            const sortedColors = Object.entries(colors).sort((a, b) => b[1] - a[1]);
+            if (sortedColors.length > 0) {
+              bgColor = normalizeToHex(sortedColors[0][0]);
+              
+              // Algoritmo de tinta (ink): procura pela cor de maior contraste e frequência significativa
+              for (let i = 1; i < Math.min(sortedColors.length, 50); i++) {
+                const [rgba, count] = sortedColors[i];
+                if (getRgbDistance(bgColor, rgba) > 0.2) {
+                  textColor = normalizeToHex(rgba);
+                  // Se a cor detectada tiver alpha < 1, usamos formato rgba real
+                  if (rgba.includes('rgba')) {
+                    const alpha = parseFloat(rgba.split(',')[3]);
+                    if (alpha < 0.95) textColor = rgba;
+                  }
+                  break;
+                }
+              }
+            }
           }
         }
       }
     } catch (e) {
-      console.warn("Could not read canvas pixels for background color", e);
+      console.warn("Extreme color detection failed", e);
     }
+    return { bgColor, textColor };
+  }, [scale]);
+
+  const handleMagicEditClick = (pt: any) => {
+    if (tool !== 'magic-edit') return;
+    
+    // Precisão Máxima: Zero Padding para cobertura 100% "colada" no texto original.
+    const paddingX = 0; 
+    const paddingY = 0;
+
+    const { bgColor, textColor } = detectColorsFromCanvas(pt, paddingX, paddingY);
     
     const angleRad = (pt.rotation || 0) * (Math.PI / 180);
     const cosA = Math.cos(angleRad);
@@ -677,58 +784,6 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
       isWhiteout: true,
     };
     
-    const getBestMatchingFont = (original: string): string => {
-      const lower = original.toLowerCase();
-      
-      // Direct matches for 200+ library
-      if (lower.includes('roboto')) return 'Roboto';
-      if (lower.includes('inter')) return 'Inter';
-      if (lower.includes('montserrat')) return 'Montserrat';
-      if (lower.includes('open sans')) return 'Open Sans';
-      if (lower.includes('lato')) return 'Lato';
-      if (lower.includes('poppins')) return 'Poppins';
-      if (lower.includes('raleway')) return 'Raleway';
-      if (lower.includes('ubuntu')) return 'Ubuntu';
-      if (lower.includes('verdana')) return 'Verdana';
-      if (lower.includes('tahoma')) return 'Tahoma';
-      if (lower.includes('trebuchet')) return 'Trebuchet MS';
-      if (lower.includes('century gothic')) return 'Century Gothic';
-      if (lower.includes('calibri')) return 'Calibri';
-      if (lower.includes('segoe ui')) return 'Segoe UI';
-      // Expanded Sans check to avoid falling into 'serif' catch-all
-      if (lower.includes('helvetica') || lower.includes('arial') || lower.includes('sans') || lower.includes('liberation')) return 'Helvetica';
-      
-      if (lower.includes('georgia')) return 'Georgia';
-      if (lower.includes('garamond')) return 'Garamond';
-      if (lower.includes('palatino')) return 'Palatino';
-      if (lower.includes('baskerville')) return 'Baskerville';
-      if (lower.includes('playfair')) return 'Playfair Display';
-      if (lower.includes('lora')) return 'Lora';
-      if (lower.includes('merriweather')) return 'Merriweather';
-      if (lower.includes('times')) return 'TimesRoman';
-      
-      if (lower.includes('consolas')) return 'Consolas';
-      if (lower.includes('fira code')) return 'Fira Code';
-      if (lower.includes('jetbrains')) return 'JetBrains Mono';
-      if (lower.includes('monaco')) return 'Monaco';
-      if (lower.includes('courier')) return 'Courier';
-      
-      if (lower.includes('comic sans')) return 'Comic Sans MS';
-      if (lower.includes('pacifico')) return 'Pacifico';
-      if (lower.includes('brush script')) return 'Brush Script MT';
-      if (lower.includes('impact')) return 'Impact';
-      
-      if (lower.includes('symbol')) return 'Symbol';
-      if (lower.includes('zapf') || lower.includes('dingbats') || lower.includes('wingdings')) return 'ZapfDingbats';
-
-      // Advanced category fallback - specifically excluding 'sans' from 'serif' check
-      if (lower.includes('serif') && !lower.includes('sans')) return 'TimesRoman';
-      if (lower.includes('mono') || lower.includes('fixed') || lower.includes('code')) return 'Courier';
-      if (lower.includes('script') || lower.includes('hand')) return 'Pacifico';
-      
-      return 'Helvetica';
-    };
-
     const originalFont = pt.fontFamily?.toLowerCase() || '';
     const mappedFont = getBestMatchingFont(originalFont);
 
@@ -744,7 +799,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
       isBold: pt.isBold,
       isItalic: pt.isItalic,
       rotation: pt.rotation,
-      color: '#000000',
+      color: textColor,
     };
     
     const newElements = [...elements, newRect, newText];
@@ -796,7 +851,16 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
     if (selectedId) {
       const selectedEl = elements.find(el => el.id === selectedId);
       if (selectedEl && 'color' in selectedEl && selectedEl.color) {
-        setColor(selectedEl.color);
+        // Normalização garantida ao selecionar: Converte qualquer formato (RGB/HSL/Nome) para Hex
+        const normalizedColor = normalizeToHex(selectedEl.color);
+        setColor(normalizedColor);
+        
+        // Se a cor original não era Hex, atualizamos o elemento para manter consistência interna
+        if (selectedEl.color !== normalizedColor) {
+          setElements(elements.map(el => 
+            el.id === selectedId ? { ...el, color: normalizedColor } : el
+          ));
+        }
       }
     }
   }, [selectedId, elements]);
@@ -841,7 +905,7 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
       const arrayBuffer = await file.arrayBuffer();
       const pdfDoc = await PDFDocument.load(arrayBuffer);
       
-      const fonts = {
+      const fonts: { [key: string]: any } = {
         Helvetica: {
           normal: await pdfDoc.embedFont(StandardFonts.Helvetica),
           bold: await pdfDoc.embedFont(StandardFonts.HelveticaBold),
@@ -859,20 +923,32 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
           bold: await pdfDoc.embedFont(StandardFonts.CourierBold),
           italic: await pdfDoc.embedFont(StandardFonts.CourierOblique),
           boldItalic: await pdfDoc.embedFont(StandardFonts.CourierBoldOblique),
-        },
-        Symbol: {
-          normal: await pdfDoc.embedFont(StandardFonts.Symbol),
-          bold: await pdfDoc.embedFont(StandardFonts.Symbol),
-          italic: await pdfDoc.embedFont(StandardFonts.Symbol),
-          boldItalic: await pdfDoc.embedFont(StandardFonts.Symbol),
-        },
-        ZapfDingbats: {
-          normal: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
-          bold: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
-          italic: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
-          boldItalic: await pdfDoc.embedFont(StandardFonts.ZapfDingbats),
         }
       };
+
+      // Collect and embed custom Google Fonts
+      const customFonts = new Set<string>();
+      elements.forEach(el => {
+        if (el.type === 'text' && el.fontFamily && !fonts[el.fontFamily]) {
+          customFonts.add(el.fontFamily);
+        }
+      });
+
+      for (const fontFamily of customFonts) {
+        try {
+          const fontData = await getFontData(fontFamily);
+          if (fontData) {
+            fonts[fontFamily] = {
+              normal: await pdfDoc.embedFont(fontData, { subset: true }),
+              bold: await pdfDoc.embedFont(fontData, { subset: true }), // Fallback to same if variant not available
+              italic: await pdfDoc.embedFont(fontData, { subset: true }),
+              boldItalic: await pdfDoc.embedFont(fontData, { subset: true }),
+            };
+          }
+        } catch (e) {
+          console.warn(`Failed to embed font ${fontFamily}:`, e);
+        }
+      }
 
       const pages = pdfDoc.getPages();
 
@@ -886,6 +962,8 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
           const rgbColor = hexToRgb(el.color);
           const getFontFamily = (family?: string) => {
             if (!family) return fonts.Helvetica;
+            if (fonts[family]) return fonts[family];
+            
             const lower = family.toLowerCase();
             
             // Comprehensive Serif Mapping
@@ -1330,202 +1408,20 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                       min="8"
                       title="Tamanho da fonte"
                     />
-                    <select
-                      value={(elements.find(el => el.id === selectedId) as TextElement).fontFamily || 'Helvetica'}
-                      onChange={(e) => {
+                    <FontPicker
+                      currentFont={(elements.find(el => el.id === selectedId) as TextElement).fontFamily || 'Helvetica'}
+                      onPreview={(font) => setPreviewFont(font)}
+                      onPreviewEnd={() => setPreviewFont(null)}
+                      onSelect={(newFont) => {
                         setElements(elements.map(el => 
-                          el.id === selectedId ? { ...el, fontFamily: e.target.value } : el
+                          el.id === selectedId ? { ...el, fontFamily: newFont } : el
                         ));
+                        pushToHistory(elements.map(el => 
+                          el.id === selectedId ? { ...el, fontFamily: newFont } : el
+                        ), hiddenPdfTextIds);
+                        setPreviewFont(null);
                       }}
-                      onBlur={() => pushToHistory(elements, hiddenPdfTextIds)}
-                      className="bg-gray-50 text-gray-800 px-2 py-1 rounded text-sm w-32 border border-gray-200 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-                      title="Fonte"
-                    >
-                      <option value="Helvetica">Helvetica / Arial (Padrão)</option>
-                      <option value="Abril Fatface">Abril Fatface</option>
-                      <option value="Alex Brush">Alex Brush</option>
-                      <option value="Algerian">Algerian</option>
-                      <option value="Allura">Allura</option>
-                      <option value="American Typewriter">American Typewriter</option>
-                      <option value="Andale Mono">Andale Mono</option>
-                      <option value="Apple Chancery">Apple Chancery</option>
-                      <option value="Arial">Arial</option>
-                      <option value="Arial Black">Arial Black</option>
-                      <option value="Arimo">Arimo</option>
-                      <option value="Arizonia">Arizonia</option>
-                      <option value="Arvo">Arvo</option>
-                      <option value="Avenir">Avenir</option>
-                      <option value="Bangers">Bangers</option>
-                      <option value="Barlow">Barlow</option>
-                      <option value="Baskerville">Baskerville</option>
-                      <option value="Bauhaus 93">Bauhaus 93</option>
-                      <option value="Bitter">Bitter</option>
-                      <option value="Blackadder ITC">Blackadder</option>
-                      <option value="Bodoni MT">Bodoni</option>
-                      <option value="Book Antiqua">Book Antiqua</option>
-                      <option value="Broadway">Broadway</option>
-                      <option value="Brush Script MT">Brush Script</option>
-                      <option value="Cabin">Cabin</option>
-                      <option value="Calibri">Calibri</option>
-                      <option value="Cambria">Cambria</option>
-                      <option value="Candara">Candara</option>
-                      <option value="Cardo">Cardo</option>
-                      <option value="Caslon">Caslon MT</option>
-                      <option value="Caveat">Caveat</option>
-                      <option value="Century Gothic">Century Gothic</option>
-                      <option value="Century Schoolbook">Century Schoolbook</option>
-                      <option value="Chiller">Chiller</option>
-                      <option value="Cinzel">Cinzel</option>
-                      <option value="Comic Sans MS">Comic Sans</option>
-                      <option value="Consolas">Consolas</option>
-                      <option value="Constantia">Constantia</option>
-                      <option value="Cookie">Cookie</option>
-                      <option value="Cooper Black">Cooper Black</option>
-                      <option value="Copperplate">Copperplate</option>
-                      <option value="Courgette">Courgette</option>
-                      <option value="Courier">Courier</option>
-                      <option value="Courier New">Courier New</option>
-                      <option value="Courier Prime">Courier Prime</option>
-                      <option value="Creepster">Creepster</option>
-                      <option value="Crimson Pro">Crimson Pro</option>
-                      <option value="Crimson Text">Crimson Text</option>
-                      <option value="Damion">Damion</option>
-                      <option value="Dancing Script">Dancing Script</option>
-                      <option value="Didot">Didot</option>
-                      <option value="Domine">Domine</option>
-                      <option value="Dosis">Dosis</option>
-                      <option value="EB Garamond">EB Garamond</option>
-                      <option value="Exo 2">Exo 2</option>
-                      <option value="Fira Code">Fira Code</option>
-                      <option value="Fira Mono">Fira Mono</option>
-                      <option value="Fira Sans">Fira Sans</option>
-                      <option value="Font Awesome">Font Awesome</option>
-                      <option value="Franklin Gothic Medium">Franklin Gothic</option>
-                      <option value="Frederickat">Fredoka One</option>
-                      <option value="Fredericka the Great">Fredericka the Great</option>
-                      <option value="Freestyle Script">Freestyle Script</option>
-                      <option value="Frutiger">Frutiger</option>
-                      <option value="Futura">Futura</option>
-                      <option value="Futura Inline">Futura Display</option>
-                      <option value="Garamond">Garamond</option>
-                      <option value="Geneva">Geneva</option>
-                      <option value="Georgia">Georgia</option>
-                      <option value="Gill Sans">Gill Sans</option>
-                      <option value="Goudy Stout">Goudy Stout</option>
-                      <option value="Great Vibes">Great Vibes</option>
-                      <option value="Handlee">Handlee</option>
-                      <option value="Haettenschweiler">Haettenschweiler</option>
-                      <option value="Heebo">Heebo</option>
-                      <option value="Helvetica Neue">Helvetica Neue</option>
-                      <option value="Hoefler Text">Hoefler Text</option>
-                      <option value="IBM Plex Mono">IBM Plex Mono</option>
-                      <option value="Impact">Impact</option>
-                      <option value="Inconsolata">Inconsolata</option>
-                      <option value="Indie Flower">Indie Flower</option>
-                      <option value="Inter">Inter</option>
-                      <option value="JetBrains Mono">JetBrains Mono</option>
-                      <option value="JokerMan">JokerMan</option>
-                      <option value="Josefin Sans">Josefin Sans</option>
-                      <option value="Josefin Slab">Josefin Slab</option>
-                      <option value="Kanit">Kanit</option>
-                      <option value="Karla">Karla</option>
-                      <option value="Kaushan Script">Kaushan Script</option>
-                      <option value="Lato">Lato</option>
-                      <option value="Libre Baskerville">Libre Baskerville</option>
-                      <option value="Lobster">Lobster</option>
-                      <option value="Lobster Two">Lobster Two</option>
-                      <option value="Lora">Lora</option>
-                      <option value="Lucida Bright">Lucida Bright</option>
-                      <option value="Lucida Console">Lucida Console</option>
-                      <option value="Lucida Handwriting">Lucida Handwriting</option>
-                      <option value="Lucida Sans Unicode">Lucida Sans</option>
-                      <option value="Luckiest Guy">Luckiest Guy</option>
-                      <option value="Material Icons">Material Icons</option>
-                      <option value="Menlo">Menlo</option>
-                      <option value="Merriweather">Merriweather</option>
-                      <option value="Mistral">Mistral</option>
-                      <option value="Monaco">Monaco</option>
-                      <option value="Monoton">Monoton</option>
-                      <option value="Montserrat">Montserrat</option>
-                      <option value="Mr Dafoe">Mr Dafoe</option>
-                      <option value="MS Gothic">MS Gothic</option>
-                      <option value="Mukta">Mukta</option>
-                      <option value="Myriad Pro">Myriad Pro</option>
-                      <option value="Nanum Gothic">Nanum Gothic</option>
-                      <option value="Nanum Gothic Coding">Nanum Gothic Coding</option>
-                      <option value="Neuton">Neuton</option>
-                      <option value="Noto Sans">Noto Sans</option>
-                      <option value="Noto Serif">Noto Serif</option>
-                      <option value="Nova Mono">Nova Mono</option>
-                      <option value="Nunito">Nunito</option>
-                      <option value="Old English Text MT">Old English</option>
-                      <option value="Old Standard TT">Old Standard TT</option>
-                      <option value="Open Sans">Open Sans</option>
-                      <option value="Optima">Optima</option>
-                      <option value="Oswald">Oswald</option>
-                      <option value="Overpass Mono">Overpass Mono</option>
-                      <option value="Oxygen Mono">Oxygen Mono</option>
-                      <option value="Pacifico">Pacifico</option>
-                      <option value="Palatino">Palatino</option>
-                      <option value="Papyrus">Papyrus</option>
-                      <option value="Parisienne">Parisienne</option>
-                      <option value="Passion One">Passion One</option>
-                      <option value="PT Mono">PT Mono</option>
-                      <option value="PT Sans">PT Sans</option>
-                      <option value="PT Serif">PT Serif</option>
-                      <option value="Patua One">Patua One</option>
-                      <option value="Perpetua">Perpetua</option>
-                      <option value="Petit Formal Script">Petit Formal Script</option>
-                      <option value="Pinyon Script">Pinyon Script</option>
-                      <option value="Playbill">Playbill</option>
-                      <option value="Playfair Display">Playfair Display</option>
-                      <option value="Poiret One">Poiret One</option>
-                      <option value="Poppins">Poppins</option>
-                      <option value="Quicksand">Quicksand</option>
-                      <option value="Raleway">Raleway</option>
-                      <option value="Ravie">Ravie</option>
-                      <option value="Righteous">Righteous</option>
-                      <option value="Roboto">Roboto</option>
-                      <option value="Roboto Mono">Roboto Mono</option>
-                      <option value="Rochester">Rochester</option>
-                      <option value="Rockwell">Rockwell</option>
-                      <option value="Sacramento">Sacramento</option>
-                      <option value="Satisfy">Satisfy</option>
-                      <option value="Segoe UI">Segoe UI</option>
-                      <option value="Shadows Into Light">Shadows Into Light</option>
-                      <option value="Share Tech Mono">Share Tech Mono</option>
-                      <option value="Showcard Gothic">Showcard Gothic</option>
-                      <option value="Snap ITC">Snap ITC</option>
-                      <option value="Snell Roundhand">Snell Roundhand</option>
-                      <option value="Source Code Pro">Source Code Pro</option>
-                      <option value="Source Sans Pro">Source Sans Pro</option>
-                      <option value="Space Mono">Space Mono</option>
-                      <option value="Special Elite">Special Elite</option>
-                      <option value="Stencil">Stencil</option>
-                      <option value="Symbol">Símbolos Matemáticos</option>
-                      <option value="Tahoma">Tahoma</option>
-                      <option value="Tangerine">Tangerine</option>
-                      <option value="TimesRoman">Times New Roman</option>
-                      <option value="Titillium Web">Titillium Web</option>
-                      <option value="Trebuchet MS">Trebuchet MS</option>
-                      <option value="Ubuntu">Ubuntu</option>
-                      <option value="Ubuntu Mono">Ubuntu Mono</option>
-                      <option value="Univers">Univers</option>
-                      <option value="Verdana">Verdana</option>
-                      <option value="Vivaldi">Vivaldi</option>
-                      <option value="Vollkorn">Vollkorn</option>
-                      <option value="VT323">VT323 (Retro)</option>
-                      <option value="Webdings">Webdings (Ícones)</option>
-                      <option value="Wide Latin">Wide Latin</option>
-                      <option value="Wingdings">Wingdings 1</option>
-                      <option value="Wingdings 2">Wingdings 2</option>
-                      <option value="Wingdings 3">Wingdings 3</option>
-                      <option value="Work Sans">Work Sans</option>
-                      <option value="Yellowtail">Yellowtail</option>
-                      <option value="ZapfDingbats">Universal Dingbats</option>
-                      <option value="Zapfino">Zapfino</option>
-                      <option value="Zilla Slab">Zilla Slab</option>
-                    </select>
+                    />
                     <div className="h-4 w-px bg-gray-300 mx-1"></div>
                     <div className="flex items-center gap-1 border border-gray-200 rounded px-1" title="Cor de fundo do texto">
                       <Highlighter size={14} className="text-gray-500"/>
@@ -1681,11 +1577,12 @@ export function EditPdfPage({ initialTool = 'select' }: { initialTool?: Tool }) 
                         {currentPageElements.map((el) => {
                           if (el.type === 'text') {
                             return (
-                              <RotatableText
+                               <RotatableText
                                 key={el.id}
                                 element={el}
                                 tool={tool}
                                 isSelected={selectedId === el.id}
+                                previewFont={previewFont}
                                 onSelect={() => tool === 'select' && setSelectedId(el.id)}
                                 onChange={(newAttrs: any) => {
                                   const newElements = elements.map(item => 
